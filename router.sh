@@ -3,6 +3,7 @@ set -e
 sudo ip netns del ns1 2>/dev/null || true
 sudo ip netns del ns2 2>/dev/null || true
 sudo ip netns del ns-router 2>/dev/null || true
+sudo ip link del veth-ns-router 2>/dev/null || true
 
 #
 
@@ -42,3 +43,17 @@ sudo ip -n ns1 route add default via 10.0.1.1
 sudo ip -n ns2 link set veth2 up
 sudo ip -n ns2 a add 10.0.2.2/24 dev veth2
 sudo ip -n ns2 route add default via 10.0.2.1
+
+#
+
+sudo ip link add veth-ns-router type veth peer name veth-host
+
+sudo ip link set veth-host netns ns-router 
+sudo ip -n ns-router link set veth-host up
+sudo ip -n ns-router a add 10.0.0.1/24 dev veth-host
+
+sudo ip link set veth-ns-router up
+sudo ip a add 10.0.0.2/24 dev veth-ns-router 
+
+sudo ip route add 10.0.1.0/24 via 10.0.0.1
+sudo ip route add 10.0.2.0/24 via 10.0.0.1
