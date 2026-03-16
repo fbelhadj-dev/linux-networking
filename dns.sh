@@ -3,6 +3,13 @@ set -e
 
 namespaces=( ns-client ns-resolver ns-root ns-tld ns-auth )
 
+# Killing named processes
+sudo ip netns exec ns-root pkill named || true
+sudo ip netns exec ns-tld pkill named || true
+
+# Removing directories
+rm -rf /tmp/bind || true
+
 # Clean up old namespaces and veths
 for ns in "${namespaces[@]}"; do 
     sudo ip netns del $ns 2>/dev/null || true
@@ -80,13 +87,72 @@ sudo ip -n ns-tld link set veth1 up
 # Routes
 sudo ip -n ns-client route add default via 10.0.0.1
 
-sudo ip -n ns-resolver route add 10.0.2.0/24 via 10.0.1.2 dev veth1 onlink
-sudo ip -n ns-resolver route add 10.0.3.0/24 via 10.0.1.2 dev veth1 onlink
+sudo ip -n ns-resolver route add 10.0.2.0/24 via 10.0.1.2 dev veth1
+sudo ip -n ns-resolver route add 10.0.3.0/24 via 10.0.1.2 dev veth1
 
 sudo ip -n ns-root route add 10.0.0.0/24 via 10.0.1.1
-sudo ip -n ns-root route add 10.0.3.0/24 via 10.0.2.2
+sudo ip -n ns-root route add 10.0.3.0/24 via 10.0.2.1
 
-sudo ip -n ns-tld route add 10.0.0.0/24 via 10.0.2.1
-sudo ip -n ns-tld route add 10.0.1.0/24 via 10.0.2.1
+sudo ip -n ns-tld route add 10.0.0.0/24 via 10.0.2.2
+sudo ip -n ns-tld route add 10.0.1.0/24 via 10.0.2.2
 
 sudo ip -n ns-auth route add default via 10.0.3.1
+
+# BIND directories
+mkdir -p /tmp/bind/ns-auth /tmp/bind/ns-tld /tmp/bind/ns-root /tmp/bind/ns-resolver
+chmod -R 777 /tmp/bind
+
+# Root server
+tee /tmp/bind/ns-root/named.conf <<EOF
+options {
+    directory "/tmp/bind/ns-root";
+    recursion no;
+    listen-on { 10.0.1.2; };
+};
+zone "." {
+    type master;
+    file "db.root";
+};
+EOF
+
+tee /tmp/bind/ns-root/db.root <<EOF
+\$TTL 3600
+@ IN SOA root. admin.root. (
+    1 3600 3600 3600 3600 )
+
+; delegation to tld
+lab.   IN NS ns.lab.
+ns.lab. IN A 10.0.2.1
+EOF
+
+# TLD server
+tee /tmp/bind/ns-tld/named.conf <<EOF
+options {
+    directory "/tmp/bind/ns-tld";
+    recursion no;
+    listen-on { 10.0.2.1; };
+};
+zone "lab" {
+    type master;
+    file "db.lab";
+};
+EOF
+
+tee /tmp/bind/ns-tld/db.lab <<EOF
+\$TTL 3600
+@ IN SOA ns.lab. admin.lab. (
+    1 3600 3600 3600 3600 )
+
+
+; delegation to auth
+@           IN NS ns-auth.lab.
+ns-auth.lab. IN A 10.0.3.2
+EOF
+
+# Start BIND in namespaces
+sudo ip netns exec ns-root named -c /tmp/bind/ns-root/named.conf &
+sleep 1
+sudo ip netns exec ns-tld named -c /tmp/bind/ns-tld/named.conf &
+
+# Resolving test.lab from inside client namespace using root server (client -> root -> TLD)
+sudo ip netns exec ns-client dig @10.0.1.2 test.lab +trace
