@@ -4,8 +4,10 @@ set -e
 namespaces=( ns-client ns-resolver ns-root ns-tld ns-auth )
 
 # Killing named processes
-sudo ip netns exec ns-root pkill named || true
-sudo ip netns exec ns-tld pkill named || true
+sudo ip netns exec ns-resolver pkill named 2>/dev/null || true
+sudo ip netns exec ns-root pkill named 2>/dev/null || true
+sudo ip netns exec ns-tld pkill named 2>/dev/null || true
+sudo ip netns exec ns-auth pkill named 2>/dev/null || true
 
 # Removing directories
 rm -rf /tmp/bind || true
@@ -44,9 +46,6 @@ sudo ip -n ns-client link set veth0 up
 
 sudo mkdir -p /etc/netns/ns-client
 echo "nameserver 10.0.0.1" | sudo tee /etc/netns/ns-client/resolv.conf
-
-sudo mkdir -p /etc/netns/ns-resolver
-echo "nameserver 10.0.0.1" | sudo tee /etc/netns/ns-resolver/resolv.conf
 
 # Resolver <-> Root
 sudo ip link add veth-ns-res1 type veth peer name veth-ns-root0
@@ -102,6 +101,25 @@ sudo ip -n ns-auth route add default via 10.0.3.1
 mkdir -p /tmp/bind/ns-auth /tmp/bind/ns-tld /tmp/bind/ns-root /tmp/bind/ns-resolver
 chmod -R 777 /tmp/bind
 
+# Resolver server
+tee /tmp/bind/ns-resolver/named.conf <<EOF
+options {
+    directory "/tmp/bind/ns-resolver";
+    recursion yes;
+    listen-on { 10.0.0.1; };
+    allow-query { any; };
+};
+zone "." {
+    type hint;
+    file "root.hints";
+};
+EOF
+
+tee /tmp/bind/ns-resolver/root.hints <<EOF
+.       IN NS ns-root.
+ns-root. IN A 10.0.1.2
+EOF
+
 # Root server
 tee /tmp/bind/ns-root/named.conf <<EOF
 options {
@@ -117,12 +135,13 @@ EOF
 
 tee /tmp/bind/ns-root/db.root <<EOF
 \$TTL 3600
-@ IN SOA root. admin.root. (
-    1 3600 3600 3600 3600 )
+@ IN SOA ns-root. admin.root. (1 3600 3600 3600 3600)
+@   IN NS ns-root.
+ns-root. IN A 10.0.1.2
 
 ; delegation to tld
-lab.   IN NS ns.lab.
-ns.lab. IN A 10.0.2.1
+lab.   IN NS ns-tld.lab.
+ns-tld.lab. IN A 10.0.2.1
 EOF
 
 # TLD server
@@ -140,19 +159,47 @@ EOF
 
 tee /tmp/bind/ns-tld/db.lab <<EOF
 \$TTL 3600
-@ IN SOA ns.lab. admin.lab. (
+@ IN SOA ns-tld.lab. admin.lab. (
     1 3600 3600 3600 3600 )
-
 
 ; delegation to auth
 @           IN NS ns-auth.lab.
 ns-auth.lab. IN A 10.0.3.2
 EOF
 
+# Auth server
+tee /tmp/bind/ns-auth/named.conf <<EOF
+options {
+    directory "/tmp/bind/ns-auth";
+    recursion no;
+    listen-on { 10.0.3.2 };
+};
+zone "lab" {
+    type master;
+    file "db.lab";
+};
+EOF
+
+tee /tmp/bind/ns-auth/db.lab <<EOF
+\$TTL 3600
+@ IN SOA ns-auth.lab. admin.lab. (
+    1 3600 3600 3600 3600 )
+
+; Fake IP resolution
+test IN A 10.0.3.3
+EOF
+
 # Start BIND in namespaces
+sudo ip netns exec ns-resolver named -c /tmp/bind/ns-resolver/named.conf &
+sleep 1
 sudo ip netns exec ns-root named -c /tmp/bind/ns-root/named.conf &
 sleep 1
 sudo ip netns exec ns-tld named -c /tmp/bind/ns-tld/named.conf &
+sleep 1
+sudo ip netns exec ns-auth named -c /tmp/bind/ns-auth/named.conf &
+sleep 1
 
-# Resolving test.lab from inside client namespace using root server (client -> root -> TLD)
-sudo ip netns exec ns-client dig @10.0.1.2 test.lab +trace
+# Testing full resolution 
+sudo ip netns exec ns-client dig test.lab 
+
+# config is kept minimal on purpose ! The goal is not only to make it work but to mimic real DNS servers !
